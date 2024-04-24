@@ -13,7 +13,7 @@ from einops import rearrange
 
 from torch.utils.cpp_extension import load
 from fla.ops.rwkv6.recurrent_fuse import FusedRecurrentRWKV6Function
-
+from fla.ops.rwkv6.chunk import chunk_rwkv6
 #adapted from https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v5/src/model.py
 
 def __noop(ob):
