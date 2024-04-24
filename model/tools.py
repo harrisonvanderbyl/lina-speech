@@ -5,13 +5,43 @@ import torch
 default_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def topk_sampling(seq, k=1, temp=1.):
-    topk = torch.topk(seq, k, dim=-1)
-    logits = seq / temp
-    mask = logits < topk.values[:, [-1]]
-    logits[mask]  = -float('Inf')
-    probs = torch.softmax(logits, dim=-1)
-    return torch.multinomial(probs, num_samples=1)
+def topk_sampling(out, k=0.25, temp=1.):
+    # out = torch.softmax(out, -1)
+    # sorted = torch.sort(out, descending=True).values
+    # # mask = out >= floor.unsqueeze(-1)
+    # # out = out[indices]
+    # min = sorted[:,torch.argmin((sorted.cumsum(0) -k).abs())]#.unsqueeze(-1)
+    # max = sorted[:,0]#.unsqueeze(-1)
+    
+    
+    
+    # dart = torch.rand(1).to(out.device) *2.0 -1.0
+    # dart = (dart.asin()/(3.1415) + 0.5).pow(1.0/temp)
+    # # print(dart.shape, min.shape, max.shape)
+    # dart = min * (dart) + max * (1.0-dart)
+    
+    # out = torch.argmin(torch.abs(out - dart)).cpu().item()
+    
+    out = torch.softmax(out, dim=-1)
+    sorted = torch.sort(out, dim=-1, descending=True).values
+    sum = sorted.sum(-1, keepdim=True)
+    minitems = torch.argmin((sorted.cumsum(-1) - k*sum).abs(), dim=-1)
+    min = torch.gather(sorted, -1, minitems.unsqueeze(-1))
+    # mask = out >= floor
+    # out = out[indices]
+    # min = floor
+    max = sorted[..., 0].unsqueeze(-1)
+    
+    dart = torch.rand(out.shape[:-1] + (1,)).to(out.device).pow(temp) * 2.0 - 1.0
+    dart = (dart.asin() / 3.1415 + 0.5)
+    # print(dart.shape, min.shape, max.shape)
+    dart = min * (1 - dart) + max * dart
+    
+    # print(dart.shape, out.shape)
+    
+    out = torch.argmin(torch.abs(out - dart), dim=-1, keepdim=True)
+    
+    return out
 
 def delay_rvq(
     code,

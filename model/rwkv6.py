@@ -9,12 +9,10 @@ from torch import Tensor
 from model.attentive_rnn import AttentiveRNN
 from model.crossatt import BlindCrossAttention, CrossAttention
 from model.base_blocks import MixingBlock, SwiGLU
-from model.rwkv_inner import rwkv_inner
 from einops import rearrange
-from fla.ops.gla import fused_chunk_gla
 
 from torch.utils.cpp_extension import load
-
+from fla.ops.rwkv6.recurrent_fuse import FusedRecurrentRWKV6Function
 
 #adapted from https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v5/src/model.py
 
@@ -25,92 +23,17 @@ def __noop(ob):
 MyFunction = __noop
 
 
-class WKV_6(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, B, T, C, H, r, k, v, w, u):
-        with torch.no_grad():
-            assert r.dtype == torch.bfloat16
-            assert k.dtype == torch.bfloat16
-            assert v.dtype == torch.bfloat16
-            assert w.dtype == torch.bfloat16
-            assert u.dtype == torch.bfloat16
-            assert HEAD_SIZE == C // H
-            ctx.B = B
-            ctx.T = T
-            ctx.C = C
-            ctx.H = H
-            assert r.is_contiguous()
-            assert k.is_contiguous()
-            assert v.is_contiguous()
-            assert w.is_contiguous()
-            assert u.is_contiguous()
-            ew = (-torch.exp(w.float())).contiguous()
-            ctx.save_for_backward(r, k, v, ew, u)
-            y = torch.empty(
-                (B, T, C),
-                device=r.device,
-                dtype=torch.bfloat16,
-                memory_format=torch.contiguous_format,
-            )  # .uniform_(-100, 100)
-            wkv6_cuda.forward(B, T, C, H, r, k, v, ew, u, y)
-            return y
-
-    @staticmethod
-    def backward(ctx, gy):
-        with torch.no_grad():
-            assert gy.dtype == torch.bfloat16
-            B = ctx.B
-            T = ctx.T
-            C = ctx.C
-            H = ctx.H
-            assert gy.is_contiguous()
-            r, k, v, ew, u = ctx.saved_tensors
-            gr = torch.empty(
-                (B, T, C),
-                device=gy.device,
-                requires_grad=False,
-                dtype=torch.bfloat16,
-                memory_format=torch.contiguous_format,
-            )  # .uniform_(-100, 100)
-            gk = torch.empty(
-                (B, T, C),
-                device=gy.device,
-                requires_grad=False,
-                dtype=torch.bfloat16,
-                memory_format=torch.contiguous_format,
-            )  # .uniform_(-100, 100)
-            gv = torch.empty(
-                (B, T, C),
-                device=gy.device,
-                requires_grad=False,
-                dtype=torch.bfloat16,
-                memory_format=torch.contiguous_format,
-            )  # .uniform_(-100, 100)
-            gw = torch.empty(
-                (B, T, C),
-                device=gy.device,
-                requires_grad=False,
-                dtype=torch.bfloat16,
-                memory_format=torch.contiguous_format,
-            )  # .uniform_(-100, 100)
-            gu = torch.empty(
-                (B, C),
-                device=gy.device,
-                requires_grad=False,
-                dtype=torch.bfloat16,
-                memory_format=torch.contiguous_format,
-            )  # .uniform_(-100, 100)
-            wkv6_cuda.backward(B, T, C, H, r, k, v, ew, u, gy, gr, gk, gv, gw, gu)
-            gu = torch.sum(gu, 0).view(H, C // H)
-            return (None, None, None, None, gr, gk, gv, gw, gu)
 
 
 def RUN_CUDA_RWKV6(B, T, C, H, r, k, v, w, u):
     return WKV_6.apply(B, T, C, H, r, k, v, w, u)
 
-
+class ctxx():
+    def save_for_backward(*args):
+        pass
+    
 class RWKV_TMix_x060(nn.Module):
-    def __init__(self, d_model, n_head, layer_id, n_layer, head_size_divisor: int=8):
+    def __init__(self, d_model:int, n_head:int, layer_id:int, n_layer:int, head_size_divisor: int=8):
         super().__init__()
         self.layer_id = layer_id
 
@@ -119,20 +42,7 @@ class RWKV_TMix_x060(nn.Module):
         self.n_head = n_head
         assert d_model % self.n_head == 0
         global wkv6_cuda
-        wkv6_cuda = load(
-            name="wkv6",
-            sources=["cuda/wkv6_op.cpp", f"cuda/wkv6_cuda.cu"],
-            verbose=True,
-            extra_cuda_cflags=[
-                "-res-usage",
-                "--use_fast_math",
-                "-O3",
-                "-Xptxas -O3",
-                "--extra-device-vectorization",
-                f"-D_N_={self.head_size}",
-                f"-D_T_={int(os.environ['RWKV_CTXLEN'])}",
-            ],
-        )
+
         with torch.no_grad():
             ratio_0_to_1 = layer_id / (n_layer - 1)  # 0 to 1
             ratio_1_to_almost0 = 1.0 - (layer_id / n_layer)  # 1 to ~0
@@ -195,29 +105,8 @@ class RWKV_TMix_x060(nn.Module):
         self.ln_x = nn.GroupNorm(
             self.n_head, d_model, eps=(1e-5) * (self.head_size_divisor**2)
         )
-
-    def wkv(self, r, k, v, w):
-            w = torch.exp(-torch.exp(w))
-            r, v, w = map(lambda x: rearrange(x, "b n (h c) -> b h n c", h=self.n_head), (r, v, w))
-            k = rearrange(k, "b n (h c) -> b h c n", h=self.n_head)
-            y = torch.zeros_like(v)
-            b, _, n, _ = r.shape
-            if self.kv_state is None:
-                    self.kv_state = torch.zeros(b, self.n_head, self.head_size, self.head_size, device=r.device).bfloat16()
-
-            for t in range(n):
-                    rt = r[:, :, [t], :]
-                    kt = k[:, :, :, [t]]
-                    vt = v[:, :, [t], :]
-                    wt = w[:, :, [t]]
-                    kvt =  kt @ vt
-                    ot = rt @ (self.time_faaaa[None, ..., None] * kvt + self.kv_state)
-                    y[:, :, t] = ot.squeeze(2)
-                    self.kv_state = self.kv_state * wt + kvt
-
-            y = rearrange(y, "b h n c -> b n (h c)")
-            return y
-
+        self.kv_state = None
+    
 
     @MyFunction
     def jit_func(self, x):
@@ -268,18 +157,19 @@ class RWKV_TMix_x060(nn.Module):
     def forward(self, x):
         B, T, C = x.size()
         H = self.n_head
+        K = self.head_size
 
         r, k, v, g, w = self.jit_func(x)
         if self.inference:
-            x = self.wkv(r, k, v, w)
+            x,self.kv_state = FusedRecurrentRWKV6Function.forward(ctxx(),r.view(B,T,H,K).transpose(1,2),k.view(B,T,H,K).transpose(1,2),v.view(B,T,H,K).transpose(1,2),w.view(B,T,H,K).transpose(2,1).exp().neg(),self.time_faaaa.view(H,K),1.0,self.kv_state,True,0)
         else:
             x = RUN_CUDA_RWKV6(B, T, C, H, r, k, v, w.bfloat16(), u=self.time_faaaa.bfloat16())
-
+        x = x.view(B , T, C)
         return self.jit_func_2(x, g)
 
 
 class RWKV_CMix_x060(nn.Module):
-    def __init__(self, d_model, layer_id, n_layer):
+    def __init__(self, d_model:int, layer_id:int, n_layer:int):
         super().__init__()
         self.layer_id = layer_id
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
@@ -327,12 +217,12 @@ def exists(x):
 class AttentiveRWKV6(AttentiveRNN):
     def __init__(
         self,
-        d_model,
-        n_layer,
-        d_context,
-        heads,
-        dropout_att=0.0,
-        d_blind=128,
+        d_model:int,
+        n_layer:int,
+        d_context:int,
+        heads:int,
+        dropout_att:float=0.0,
+        d_blind:int=128,
         blind=False,
         light=False,
     ):
