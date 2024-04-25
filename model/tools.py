@@ -21,9 +21,17 @@ def topk_sampling(out, k=0.25, temp=1.):
     # dart = min * (dart) + max * (1.0-dart)
     
     # out = torch.argmin(torch.abs(out - dart)).cpu().item()
+    out = torch.softmax(out, -1)
+    sorted = torch.sort(out, descending=True, dim=-1)
+    indices = sorted.indices
+    sorted = sorted.values
+    cumsum = sorted.cumsum(-1)
+    diff = (cumsum[..., 1:] - cumsum[..., :-1])
     
-    out = torch.softmax(out, dim=-1)
-    sorted = torch.sort(out, dim=-1, descending=True).values
+    # diff = diff / diff.square().sum(-1, keepdim=True).sqrt()
+    diff = torch.softmax(diff, -1)
+    
+    sorted = torch.sort(diff, dim=-1, descending=True).values
     sum = sorted.sum(-1, keepdim=True)
     minitems = torch.argmin((sorted.cumsum(-1) - k*sum).abs(), dim=-1)
     min = torch.gather(sorted, -1, minitems.unsqueeze(-1))
@@ -32,16 +40,16 @@ def topk_sampling(out, k=0.25, temp=1.):
     # min = floor
     max = sorted[..., 0].unsqueeze(-1)
     
-    dart = torch.rand(out.shape[:-1] + (1,)).to(out.device).pow(temp) * 2.0 - 1.0
-    dart = (dart.asin() / 3.1415 + 0.5)
+    dart = torch.rand(out.shape[:-1] + (1,)).to(out.device) #* 2.0 - 1.0
+    #dart = (dart.asin() / 3.1415 + 0.5)#
     # print(dart.shape, min.shape, max.shape)
     dart = min * (1 - dart) + max * dart
     
     # print(dart.shape, out.shape)
     
-    out = torch.argmin(torch.abs(out - dart), dim=-1, keepdim=True)
+    out = torch.argmin(torch.abs(diff - dart), dim=-1, keepdim=True)
     
-    return out
+    return indices.gather(-1, out)
 
 def delay_rvq(
     code,
@@ -65,7 +73,7 @@ def undelay_rvq(extended_code):
     for i in range(q):
         out.append(torch.roll(extended_code[i], -(i + 1), dims=1))
     out = torch.stack(out, dim=0)
-    return out[:, :, :-(q+1)]
+    return out[:, :, :]
 
 def to_vocos(x):
     x = undelay_rvq(x.T)
