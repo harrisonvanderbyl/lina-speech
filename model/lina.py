@@ -34,7 +34,7 @@ def callback(in_data, frame_count, time_info, status):
         #     mdata = bytedata.pop(0).numpy().tobytes()
         #     lastbits += mdata
         while lastbits.__len__() < pointer + frame_count*2:
-            sleep(1)
+            sleep(0.01)
             
             
             
@@ -43,7 +43,11 @@ def callback(in_data, frame_count, time_info, status):
         
         # byte data to frames
         data = lastbits[pointer:pointer + frame_count*2]
-        pointer += frame_count*2
+        pointer = min(pointer + frame_count*2, lastbits.__len__())
+        
+        if(data.__len__() < frame_count*2):
+            data = data + (b'\x00' * (frame_count*2 - data.__len__()))
+            
         # If len(data) is less than requested frame_count, PyAudio automatically
         # assumes the stream is finished, and the stream stops.
         return (data, pyaudio.paContinue)
@@ -53,57 +57,71 @@ stream = pya.open(format=pya.get_format_from_width(width=2), channels=1, rate=24
 started = False
 vocos = Vocos.from_pretrained("charactr/vocos-encodec-24khz")
 n_special_token_in_g = 2
+
 n_quant_g = 4
 streambuffer = []
+running = True
+lasttoks = []
+def submit(mnta, buffsize, index):
+    global lasttoks, n_special_token_in_g, lastbits
+    index += buffsize
+    # if oldtoks.__len__() == 0:
+    #     oldtoks = mnta.copy()
+        
+    #     continue
+    if lasttoks.__len__() == 0:
+        lasttoks = mnta.copy()
+        return index
+        
+        
+    # mnt = list(mnt.__reversed__())
+    # if mnt.__len__() > 1:
+    
+    mnt = torch.stack(lasttoks+mnta, dim=2).squeeze(-1)
+    # oldtoks = lasttoks.copy()
+    lasttoks = mnta.copy()
+    
+    mnt = undelay_rvq(mnt)
+    mnt = mnt.sub(n_special_token_in_g).clamp_min(0)
+    # print(n_special_token_in_g)
+    mnt = mnt[:,0,0:buffsize].squeeze(0)
+    
+    # else :
+    #     mnt = torch.stack(mnt[0],1).reshape(1,-1,1).sub(n_special_token_in_g).relu()
+    feat = vocos.codes_to_features(mnt)#[...,prompt_codec.shape[2]:])
+    wav:torch.Tensor = vocos.decode(feat, bandwidth_id=torch.tensor(0))
+    wav = wav.clamp(-1, 1)
+    wav = (wav * 32767).to(torch.int16)
+    # stream.write(wav.cpu().numpy().tobytes())
+    lastbits += wav.cpu().numpy().tobytes()
+    return index
+
 def outloop():
     global streambuffer,bytedata,started, lastbits
-    lastbit = None
-    lasttoks = []
-    oldtoks = []
+    
     index = 0
     
     buffsize = 64
-    while 1:
+    while running or streambuffer.__len__() >= index+buffsize:
         if streambuffer.__len__() >= index+buffsize:
+            
             mnta = streambuffer[index:index + buffsize].copy()
-            index += buffsize
-            # if oldtoks.__len__() == 0:
-            #     oldtoks = mnta.copy()
-                
-            #     continue
-            if lasttoks.__len__() == 0:
-                lasttoks = mnta.copy()
-                
-                continue
-            # mnt = list(mnt.__reversed__())
-            # if mnt.__len__() > 1:
-            
-            mnt = torch.stack(lasttoks+mnta, dim=2).squeeze(-1)
-            # oldtoks = lasttoks.copy()
-            lasttoks = mnta.copy()
-            
-            mnt = undelay_rvq(mnt)
-            mnt = mnt.sub(n_special_token_in_g).clamp_min(0)
-            # print(n_special_token_in_g)
-            mnt = mnt[:,0,32:96].squeeze(0)
-            
-            # else :
-            #     mnt = torch.stack(mnt[0],1).reshape(1,-1,1).sub(n_special_token_in_g).relu()
-            feat = vocos.codes_to_features(mnt)#[...,prompt_codec.shape[2]:])
-            wav:torch.Tensor = vocos.decode(feat, bandwidth_id=torch.tensor(0))
-            wav = wav.clamp(-1, 1)
-            wav = (wav * 32767).to(torch.int16)
-            # stream.write(wav.cpu().numpy().tobytes())
-            lastbits += wav.cpu().numpy().tobytes()
+            index = submit(mnta, buffsize, index)
             # if not started:
             #     stream.start_stream()
             #     started = True
         else:
             sleep(0.1)
-            
+    
+    submit(streambuffer[index:], streambuffer.__len__()-index, index)
+    sleep(2)
             
 t = Thread(target=outloop)
 t.start()
+
+def endstream():
+    global running
+    running = False
 
 def exists(x):
     return x is not None
@@ -234,9 +252,10 @@ class Lina(ptl.LightningModule):
         prompt: Optional[Tensor] = None,
         device: str = "cpu",
         max_seqlen: int = 1000,
-        k: int = 100,
-        first_greedy_quant: int = 1,
+        k: float = 0.0,
+        first_greedy_quant = None,
         temp: float = 1.0,
+        state = None
     ):
         x = repeat(x, "n -> b n", b=batch_size).to(device)
         stop_token = torch.ones(self.n_quant, 1, 1, device=device) * 2
@@ -258,7 +277,10 @@ class Lina(ptl.LightningModule):
 
         x_enc = self.txt_encoder(x_embd, x_mask) if exists(self.txt_encoder) else x_embd
         print("Encoding done")
-        self.attentive_rnn.init_state(max_seqlen=max_seqlen)
+        if state == None:
+            self.attentive_rnn.init_state(max_seqlen=max_seqlen)
+        else:
+            self.attentive_rnn.set_state(state)
         print("Init done")
         qs, atts, stop_tokens = [], [], []
 
@@ -268,19 +290,22 @@ class Lina(ptl.LightningModule):
             logits = self.logits_head(y_embd)
             logits = rearrange(logits, "b 1 q l -> q b l")
             q_sampled = []
-
+            qmax = []
             for i, q in enumerate(logits):
                 q_sampled.append(
-                    topk_sampling(q, k=k, temp=temp)
-                    if i < first_greedy_quant
-                    else topk_sampling(q, k=1)
+                    topk_sampling(q, k=k, greedy=True)
+                    if first_greedy_quant and i > first_greedy_quant
+                    else topk_sampling(q, k=k, greedy=False, temp=temp)
                 )
+                qmax.append(topk_sampling(q, k=1, greedy=True))
             q_sampled = torch.stack(q_sampled)
+            qmax = torch.stack(qmax)
             qs.append(q_sampled)
 
-            is_stop_token = (q_sampled == stop_token).prod(dim=0)
+            is_stop_token = (qmax == stop_token).prod(dim=0)
+            ois_stop_token = (q_sampled == stop_token).prod(dim=0)
             stop_tokens.append(is_stop_token)
-            if is_stop_token.prod():
+            if is_stop_token.prod() or ois_stop_token.prod():
                 break
 
             if exists(prompt) and t < p_len:
@@ -303,7 +328,7 @@ class Lina(ptl.LightningModule):
         for i in range(stop_idx.shape[0]):
             idx = torch.unique(stop_idx[i])[1]
             cuts.append((rvq[:,[i], :idx-self.n_quant], atts[i, 1, :idx]))
-        return qs, atts, stop_tokens, cuts
+        return qs, atts, stop_tokens, cuts, self.attentive_rnn.get_state()
 
        
     @torch.inference_mode()

@@ -266,6 +266,36 @@ class AttentiveRWKV6(AttentiveRNN):
         self.cross_att.pos_net.tmix.state = None
         self.cross_att.pos_net.cmix.state = None
         self.cross_att.pos_net.tmix.kv_state = None
+        
+    def set_state(self, state):
+        for be, bd in zip(self.encoder, self.decoder):
+            be.tmix.inference, bd.tmix.inference = True, True
+            be.cmix.inference, bd.cmix.inference = True, True
+            be.tmix.state, bd.tmix.state = None, None
+            be.cmix.state, bd.cmix.state = None, None
+            be.tmix.kv_state, bd.tmix.kv_state = None, None
+            
+        self.cross_att.pos_net.tmix.inference = True
+        self.cross_att.pos_net.cmix.inference = True
+        
+        self.cross_att.pos_net.tmix.state = state[0]
+        self.cross_att.pos_net.cmix.state = state[1]
+        self.cross_att.pos_net.tmix.kv_state = state[2]
+        for num, i in enumerate(self.encoder):
+            i.tmix.state = state[3][num][0]
+            i.cmix.state = state[3][num][1]
+            i.tmix.kv_state = state[3][num][2]
+        for num, i in enumerate(self.decoder):
+            i.tmix.state =  state[4][num][0]
+            i.cmix.state = state[4][num][1]
+            i.tmix.kv_state = state[4][num][2]
+        
+    def get_state(self):
+        return [self.cross_att.pos_net.tmix.state, 
+                self.cross_att.pos_net.cmix.state, 
+                self.cross_att.pos_net.tmix.kv_state, 
+                [[i.tmix.state, i.cmix.state, i.tmix.kv_state] for i in self.encoder], 
+                [[i.tmix.state, i.cmix.state, i.tmix.kv_state] for i in self.decoder]]
 
 
     def step(self, y_embd, x_enc, time_step):

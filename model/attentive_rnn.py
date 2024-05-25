@@ -11,6 +11,14 @@ class AttentiveRNN(torch.nn.Module):
     @abstractmethod
     def init_state(self):
         pass
+    
+    @abstractmethod
+    def set_state(self, state):
+        pass
+    
+    @abstractmethod
+    def get_state(self):
+        pass
 
     @abstractmethod
     def step(self, x, ctx, x_mask=None, y_mask=None):
