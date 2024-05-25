@@ -15,9 +15,9 @@ Compared to other LM TTS model :
 
 | Model | #Params | Dataset | Checkpoint | Steps | Note |
 | :---: | :---: |:---: |:---: |:---: |:---: |
-| GLA | 60M | Librilight-medium | [Download](https://nubo.ircam.fr/index.php/s/wjNYLb54m7L8xf9) | 300k | GPU inference only |
-| Mamba| 60M | Librilight-medium |[Download](https://nubo.ircam.fr/index.php/s/wjNYLb54m7L8xf9)| 300k | GPU inference only |
-| RWKV v6 | 60M | LibriTTS |[Download](https://nubo.ircam.fr/index.php/s/wjNYLb54m7L8xf9) | 150k | GPU inference only |
+| GLA | 60M, 130M | Librilight-medium | [Download](https://huggingface.co/lina-speech/all-models/tree/main) | 300k | GPU inference only |
+| Mamba| 60M | Librilight-medium |[Download](https://huggingface.co/lina-speech/all-models/tree/main)| 300k | GPU inference only |
+| RWKV v6 | 60M | LibriTTS |[Download](https://huggingface.co/lina-speech/all-models/tree/main) | 150k | GPU inference only |
 
 ### Installation
 Following the linear complexity LM you choose, follow respective instructions first:
@@ -56,7 +56,12 @@ Download configuration and weights above, then check `Inference.ipynb`.
 ```
 ### IRCAM
 
-This work takes place at IRCAM, and is part of the following project :
+This work is performed in the [Analysis/Synthesis team of the STMS Laboratory](https://www.stms-lab.fr/team/analyse-et-synthese-des-sons/) at IRCAM, and is part of the following project: 
 [ANR Exovoices](https://anr.fr/Projet-ANR-21-CE23-0040)
 
-<img align="left" width="200" height="200" src="logo_ircam.jpeg">
+<img align="left" width="150"  src="https://github.com/theodorblackbird/lina-speech/assets/1331899/7391b3c2-ec9a-431e-a090-f2ac5f55026b">
+<img align="left" width="150"  src="logo_ircam.jpeg">
+<img align="left" width="150" src="https://github.com/theodorblackbird/lina-speech/assets/1331899/74cc1ade-be95-4087-9cc1-83af6d7a54be">
+<img align="left" width="150" src="https://github.com/theodorblackbird/lina-speech/assets/1331899/fc0ae259-26ae-451b-8893-80471255479d">
+
+
